@@ -1,0 +1,30 @@
+{
+  "name": "reference-overlay",
+  "version": "1.0.0",
+  "description": "Figma plugin to view reference images and PRD documents in a floating panel while designing.",
+  "scripts": {
+    "dev": "concurrently \"vite build --watch --mode development\" \"tsc --build --watch\"",
+    "build": "tsc --build && npm run build:ui && npm run build:main",
+    "build:ui": "vite build",
+    "build:main": "esbuild src/main.ts --bundle --outfile=dist/main.js --target=es6 --format=iife",
+    "build:all": "npm run build"
+  },
+  "dependencies": {
+    "mammoth": "^1.11.0",
+    "marked": "^17.0.3",
+    "pdfjs-dist": "^5.4.624",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@figma/plugin-typings": "^1.100.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.3",
+    "vite": "^6.0.3",
+    "vite-plugin-singlefile": "^2.0.3"
+  }
+}
