@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, type ReactNode } from "react";
-import type { ReferenceImage, Document, Note } from "./types";
+import type { ReferenceImage, Document, Note, Project } from "./types";
 import DocPanel from "./DocPanel";
 
 function Tooltip({ label, children }: { label: string; children: ReactNode }) {
@@ -127,17 +127,29 @@ function UploadIcon() {
   );
 }
 
+function FolderIcon() {
+  return (
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+    </svg>
+  );
+}
+
 type Tab = "images" | "docs" | "notes";
 
 // --- Main App ---
 export default function App() {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [projectMenuOpen, setProjectMenuOpen] = useState(false);
+  const [renamingProjectId, setRenamingProjectId] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const renameInputRef = useRef<HTMLInputElement>(null);
+
   const [tab, setTab] = useState<Tab>("images");
-  const [references, setReferences] = useState<ReferenceImage[]>([]);
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [notes, setNotes] = useState<Note[]>([]);
+  const [activeId, setActiveId] = useState<string | null>(null);
   const [activeNoteId, setActiveNoteId] = useState<string | null>(null);
   const notesSaveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [activeId, setActiveId] = useState<string | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [compareMode, setCompareMode] = useState(false);
   const [compareId, setCompareId] = useState<string | null>(null);
@@ -147,38 +159,48 @@ export default function App() {
   const [copied, setCopied] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const active = references.find((r) => r.id === activeId) ?? null;
-  const compareRef = references.find((r) => r.id === compareId) ?? null;
+  // Derived: current project
+  const project = projects.find((p) => p.id === activeProjectId) ?? null;
+  const references = project?.references ?? [];
+  const documents = project?.documents ?? [];
+  const notes = project?.notes ?? [];
 
+  const active = references.find((r) => r.id === activeId) ?? null;
+  const compareRefImg = references.find((r) => r.id === compareId) ?? null;
+
+  // --- Persistence helpers ---
+  const saveProjects = useCallback((next: Project[]) => {
+    parent.postMessage({ pluginMessage: { type: "save-projects", payload: next } }, "*");
+  }, []);
+
+  const updateCurrentProject = useCallback(
+    (updater: (p: Project) => Project) => {
+      setProjects((prev) => {
+        const next = prev.map((p) => (p.id === activeProjectId ? updater(p) : p));
+        saveProjects(next);
+        return next;
+      });
+    },
+    [activeProjectId, saveProjects]
+  );
+
+  // --- Load projects on mount ---
   useEffect(() => {
-    parent.postMessage({ pluginMessage: { type: "load-references" } }, "*");
-    parent.postMessage({ pluginMessage: { type: "load-documents" } }, "*");
-    parent.postMessage({ pluginMessage: { type: "load-notes" } }, "*");
+    parent.postMessage({ pluginMessage: { type: "load-projects" } }, "*");
     const handler = (e: MessageEvent) => {
       const msg = e.data?.pluginMessage;
       if (!msg) return;
-      if (msg.type === "loaded-references" && Array.isArray(msg.payload)) {
-        setReferences(msg.payload);
-        if (msg.payload.length > 0) setActiveId(msg.payload[0].id);
-      }
-      if (msg.type === "loaded-documents" && Array.isArray(msg.payload)) {
-        setDocuments(msg.payload);
-      }
-      if (msg.type === "loaded-notes") {
-        const payload = msg.payload;
-        if (Array.isArray(payload) && payload.length > 0) {
-          setNotes(payload);
-          setActiveNoteId(payload[0].id);
-        } else if (typeof payload === "string" && payload) {
-          const migrated: Note[] = [{ id: generateId(), title: "Notes", content: payload }];
-          setNotes(migrated);
-          setActiveNoteId(migrated[0].id);
-          parent.postMessage({ pluginMessage: { type: "save-notes", payload: migrated } }, "*");
-        } else {
-          const first: Note[] = [{ id: generateId(), title: "Notes", content: "" }];
-          setNotes(first);
-          setActiveNoteId(first[0].id);
-          parent.postMessage({ pluginMessage: { type: "save-notes", payload: first } }, "*");
+      if (msg.type === "loaded-projects" && Array.isArray(msg.payload)) {
+        const loaded: Project[] = msg.payload;
+        setProjects(loaded);
+        if (loaded.length > 0) {
+          setActiveProjectId(loaded[0].id);
+          if (loaded[0].references.length > 0) {
+            setActiveId(loaded[0].references[0].id);
+          }
+          if (loaded[0].notes.length > 0) {
+            setActiveNoteId(loaded[0].notes[0].id);
+          }
         }
       }
     };
@@ -186,63 +208,80 @@ export default function App() {
     return () => window.removeEventListener("message", handler);
   }, []);
 
-  const handleDocumentsChange = useCallback((docs: Document[]) => {
-    setDocuments(docs);
-    parent.postMessage({ pluginMessage: { type: "save-documents", payload: docs } }, "*");
-  }, []);
+  // Reset tab-level active IDs when switching projects
+  const switchProject = useCallback((id: string) => {
+    setActiveProjectId(id);
+    setCompareMode(false);
+    setCompareId(null);
+    setPickMode(false);
+    setPickedColor(null);
+    setFocusMode(false);
+    const p = projects.find((pr) => pr.id === id);
+    setActiveId(p?.references[0]?.id ?? null);
+    setActiveNoteId(p?.notes[0]?.id ?? null);
+  }, [projects]);
 
-  const handleNotesChange = useCallback((id: string, content: string) => {
-    setNotes((prev) => {
-      const next = prev.map((n) => (n.id === id ? { ...n, content } : n));
-      if (notesSaveTimeoutRef.current) clearTimeout(notesSaveTimeoutRef.current);
-      notesSaveTimeoutRef.current = setTimeout(() => {
-        parent.postMessage({ pluginMessage: { type: "save-notes", payload: next } }, "*");
-        notesSaveTimeoutRef.current = null;
-      }, 300);
+  // --- Project CRUD ---
+  const addProject = useCallback(() => {
+    const newProject: Project = {
+      id: generateId(),
+      name: "New Project",
+      references: [],
+      documents: [],
+      notes: [{ id: generateId(), title: "Notes", content: "" }],
+    };
+    setProjects((prev) => {
+      const next = [...prev, newProject];
+      saveProjects(next);
       return next;
     });
-  }, []);
+    setActiveProjectId(newProject.id);
+    setActiveId(null);
+    setActiveNoteId(newProject.notes[0].id);
+    setProjectMenuOpen(false);
+  }, [saveProjects]);
 
-  const handleNoteTitleChange = useCallback((id: string, title: string) => {
-    setNotes((prev) => {
-      const next = prev.map((n) => (n.id === id ? { ...n, title } : n));
-      parent.postMessage({ pluginMessage: { type: "save-notes", payload: next } }, "*");
+  const deleteProject = useCallback((id: string) => {
+    setProjects((prev) => {
+      if (prev.length <= 1) return prev; // can't delete last project
+      const next = prev.filter((p) => p.id !== id);
+      if (activeProjectId === id) {
+        setActiveProjectId(next[0]?.id ?? null);
+        setActiveId(next[0]?.references[0]?.id ?? null);
+        setActiveNoteId(next[0]?.notes[0]?.id ?? null);
+      }
+      saveProjects(next);
       return next;
     });
+  }, [activeProjectId, saveProjects]);
+
+  const startRename = useCallback((id: string, currentName: string) => {
+    setRenamingProjectId(id);
+    setRenameValue(currentName);
+    setTimeout(() => renameInputRef.current?.focus(), 50);
   }, []);
 
-  const addNote = useCallback(() => {
-    const newNote: Note = { id: generateId(), title: "New note", content: "" };
-    setNotes((prev) => {
-      const next = [...prev, newNote];
-      parent.postMessage({ pluginMessage: { type: "save-notes", payload: next } }, "*");
+  const commitRename = useCallback(() => {
+    if (!renamingProjectId || !renameValue.trim()) {
+      setRenamingProjectId(null);
+      return;
+    }
+    setProjects((prev) => {
+      const next = prev.map((p) =>
+        p.id === renamingProjectId ? { ...p, name: renameValue.trim() } : p
+      );
+      saveProjects(next);
       return next;
     });
-    setActiveNoteId(newNote.id);
-  }, []);
+    setRenamingProjectId(null);
+  }, [renamingProjectId, renameValue, saveProjects]);
 
-  const deleteNote = useCallback((id: string) => {
-    setNotes((prev) => {
-      const next = prev.filter((n) => n.id !== id);
-      if (activeNoteId === id) setActiveNoteId(next[0]?.id ?? null);
-      parent.postMessage({ pluginMessage: { type: "save-notes", payload: next } }, "*");
-      return next;
-    });
-  }, [activeNoteId]);
-
-  const save = useCallback((refs: ReferenceImage[]) => {
-    parent.postMessage({ pluginMessage: { type: "save-references", payload: refs } }, "*");
-  }, []);
-
+  // --- References (images) ---
   const updateReferences = useCallback(
     (updater: (prev: ReferenceImage[]) => ReferenceImage[]) => {
-      setReferences((prev) => {
-        const next = updater(prev);
-        save(next);
-        return next;
-      });
+      updateCurrentProject((p) => ({ ...p, references: updater(p.references) }));
     },
-    [save]
+    [updateCurrentProject]
   );
 
   const handleUpload = () => fileInputRef.current?.click();
@@ -285,6 +324,41 @@ export default function App() {
     updateReferences((prev) => prev.map((r) => (r.id === id ? { ...r, [field]: v } : r)));
   };
 
+  // --- Documents ---
+  const handleDocumentsChange = useCallback((docs: Document[]) => {
+    updateCurrentProject((p) => ({ ...p, documents: docs }));
+  }, [updateCurrentProject]);
+
+  // --- Notes ---
+  const handleNotesChange = useCallback((id: string, content: string) => {
+    updateCurrentProject((p) => {
+      const next = p.notes.map((n) => (n.id === id ? { ...n, content } : n));
+      return { ...p, notes: next };
+    });
+  }, [updateCurrentProject]);
+
+  const handleNoteTitleChange = useCallback((id: string, title: string) => {
+    updateCurrentProject((p) => ({
+      ...p,
+      notes: p.notes.map((n) => (n.id === id ? { ...n, title } : n)),
+    }));
+  }, [updateCurrentProject]);
+
+  const addNote = useCallback(() => {
+    const newNote: Note = { id: generateId(), title: "New note", content: "" };
+    updateCurrentProject((p) => ({ ...p, notes: [...p.notes, newNote] }));
+    setActiveNoteId(newNote.id);
+  }, [updateCurrentProject]);
+
+  const deleteNote = useCallback((id: string) => {
+    updateCurrentProject((p) => {
+      const next = p.notes.filter((n) => n.id !== id);
+      if (activeNoteId === id) setActiveNoteId(next[0]?.id ?? null);
+      return { ...p, notes: next };
+    });
+  }, [updateCurrentProject, activeNoteId]);
+
+  // --- Color picker ---
   const handleColorPick = (hex: string) => {
     setPickedColor(hex);
     setCopied(false);
@@ -298,20 +372,35 @@ export default function App() {
     });
   };
 
+  // --- Keyboard ---
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (pickMode) setPickMode(false);
         else if (focusMode) setFocusMode(false);
+        else if (projectMenuOpen) setProjectMenuOpen(false);
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [pickMode, focusMode]);
+  }, [pickMode, focusMode, projectMenuOpen]);
+
+  // Close project menu on outside click
+  useEffect(() => {
+    if (!projectMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest(".project-bar")) {
+        setProjectMenuOpen(false);
+      }
+    };
+    window.addEventListener("click", handler);
+    return () => window.removeEventListener("click", handler);
+  }, [projectMenuOpen]);
 
   const themeClass = darkMode ? "theme-dark" : "theme-light";
 
-  // --- Focus mode: image only + floating restore button ---
+  // --- Focus mode ---
   if (focusMode) {
     return (
       <div className={`focus-view ${themeClass}`}>
@@ -332,6 +421,81 @@ export default function App() {
   // --- Full UI ---
   return (
     <div className={`plugin-root ${themeClass}`}>
+      {/* Project bar */}
+      <div className="project-bar">
+        <button
+          className="project-selector"
+          onClick={() => setProjectMenuOpen((o) => !o)}
+          title={project?.name ?? "Select project"}
+        >
+          <FolderIcon />
+          <span className="project-name">{project?.name ?? "No project"}</span>
+          <span className="project-chevron">▾</span>
+        </button>
+
+        {projectMenuOpen && (
+          <div className="project-menu">
+            {projects.map((p) => (
+              <div
+                key={p.id}
+                className={`project-menu-item ${p.id === activeProjectId ? "project-menu-item-active" : ""}`}
+              >
+                {renamingProjectId === p.id ? (
+                  <input
+                    ref={renameInputRef}
+                    className="project-rename-input"
+                    value={renameValue}
+                    onChange={(e) => setRenameValue(e.target.value)}
+                    onBlur={commitRename}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") commitRename();
+                      if (e.key === "Escape") setRenamingProjectId(null);
+                    }}
+                  />
+                ) : (
+                  <span
+                    className="project-menu-label"
+                    onClick={() => {
+                      switchProject(p.id);
+                      setProjectMenuOpen(false);
+                    }}
+                  >
+                    {p.name}
+                  </span>
+                )}
+                <div className="project-menu-actions">
+                  <button
+                    className="project-menu-btn"
+                    title="Rename"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      startRename(p.id, p.name);
+                    }}
+                  >
+                    ✎
+                  </button>
+                  {projects.length > 1 && (
+                    <button
+                      className="project-menu-btn project-menu-btn-danger"
+                      title="Delete project"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteProject(p.id);
+                      }}
+                    >
+                      <TrashIcon />
+                    </button>
+                  )}
+                </div>
+              </div>
+            ))}
+            <button className="project-menu-add" onClick={addProject}>
+              + New Project
+            </button>
+          </div>
+        )}
+      </div>
+
       {/* Toolbar */}
       <div className="toolbar">
         <div className="toolbar-group">
@@ -414,10 +578,9 @@ export default function App() {
         </button>
       </div>
 
-      {/* Tab content - both always mounted to preserve scroll position */}
+      {/* Tab content */}
       <div className="tab-content-wrap">
       <div className={tab === "images" ? "tab-pane" : "tab-pane tab-pane-hidden"}>
-        {/* Thumbnail strip */}
         <div className="thumbnail-strip">
             {references.map((ref) => (
               <div
@@ -479,13 +642,12 @@ export default function App() {
             style={{ display: "none" }}
           />
 
-          {/* Preview area */}
           <div className="preview-area">
-            {compareMode && active && compareRef ? (
+            {compareMode && active && compareRefImg ? (
               <div className="compare-container">
                 <ImagePreview ref_={active} pickMode={pickMode} onColorPick={handleColorPick} onZoomChange={(z) => updateField(active.id, "zoom", z)} onFitWidthApplied={() => updateField(active.id, "fitWidthOnFirstView", false)} />
                 <div className="compare-divider" />
-                <ImagePreview ref_={compareRef} pickMode={pickMode} onColorPick={handleColorPick} onZoomChange={(z) => updateField(compareRef.id, "zoom", z)} onFitWidthApplied={() => updateField(compareRef.id, "fitWidthOnFirstView", false)} />
+                <ImagePreview ref_={compareRefImg} pickMode={pickMode} onColorPick={handleColorPick} onZoomChange={(z) => updateField(compareRefImg.id, "zoom", z)} onFitWidthApplied={() => updateField(compareRefImg.id, "fitWidthOnFirstView", false)} />
               </div>
             ) : active ? (
               <ImagePreview ref_={active} pickMode={pickMode} onColorPick={handleColorPick} onZoomChange={(z) => updateField(active.id, "zoom", z)} onFitWidthApplied={() => updateField(active.id, "fitWidthOnFirstView", false)} />
@@ -497,7 +659,6 @@ export default function App() {
               </div>
             )}
 
-            {/* Floating color pill */}
             {pickedColor && (
               <div className="color-pill" onClick={copyColor}>
                 <div className="color-pill-swatch" style={{ background: pickedColor }} />
@@ -507,7 +668,6 @@ export default function App() {
             )}
           </div>
 
-          {/* Bottom bar */}
           {active && (
             <div className="bottom-bar">
               <Tooltip label="Zoom out">

@@ -22,3 +22,11 @@ export interface Note {
   title: string;
   content: string;
 }
+
+export interface Project {
+  id: string;
+  name: string;
+  references: ReferenceImage[];
+  documents: Document[];
+  notes: Note[];
+}
